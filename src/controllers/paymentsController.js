@@ -63,7 +63,7 @@ function formatDateFr(value) {
 
 function normalizeSlot(slot) {
   const value = String(slot || "").trim();
-  if (!["morning", "afternoon"].includes(value)) return null;
+  if (!["morning", "afternoon", "early_morning"].includes(value)) return null;
   return value;
 }
 
@@ -119,15 +119,14 @@ async function assertSlotAvailable(conn, { date, slot, type }) {
     throw err;
   }
 
-  // Une ligne par réservation — COUNT(*) est correct
   const [[paidRow]] = await conn.query(
-    "SELECT COUNT(*) AS total FROM reservations WHERE date_start <= ? AND date_end >= ? AND slot=? AND type=? AND status='paid' FOR UPDATE",
-    [date, date, slot, type]
+    "SELECT COUNT(*) AS total FROM reservations WHERE date=? AND slot=? AND type=? AND status='paid' FOR UPDATE",
+    [date, slot, type]
   );
 
   const [[holdsRow]] = await conn.query(
-    "SELECT COUNT(*) AS total FROM reservation_holds WHERE date_start <= ? AND date_end >= ? AND slot=? AND type=? AND expires_at > NOW() FOR UPDATE",
-    [date, date, slot, type]
+    "SELECT COUNT(*) AS total FROM reservation_holds WHERE date=? AND slot=? AND type=? AND expires_at > NOW() FOR UPDATE",
+    [date, slot, type]
   );
 
   if (Number(paidRow.total) + Number(holdsRow.total) >= Number(quota)) {
@@ -205,7 +204,9 @@ async function sendPaymentConfirmationEmail(summary) {
 
   const from = process.env.SMTP_FROM || "RKbeauty <no-reply@rkbeauty.fr>";
   const subject = "Confirmation de votre réservation — RKbeauty";
-  const slotLabel = summary.slot === "morning" ? "Matin — 11h30 à 14h30" : "Après-midi — 15h30 à 18h30";
+  const slotLabel = summary.slot === "early_morning" ? "Matin — 8h30 à 11h30"
+    : summary.slot === "morning" ? "Matin — 11h30 à 14h30"
+    : "Après-midi — 15h30 à 18h30";
   const typeLabel = summary.type === "service" ? "Prestation" : "Formation";
   const period =
     summary.dateStart && summary.dateEnd && summary.dateStart !== summary.dateEnd
@@ -228,6 +229,8 @@ Créneau : ${slotLabel}
 ${summary.duration ? `Durée : ${summary.duration}\n` : ""}Montant payé : ${paid}
 ${balance ? `Reste à régler le jour J : ${balance}\n` : ""}
 
+Lieu : ${process.env.FORMATION_ADDRESS || "22, rue de la révolution, Montreuil, 93100"}
+
 Vous recevrez toute information complémentaire si nécessaire.
 Merci pour votre confiance.
 
@@ -249,6 +252,7 @@ RKbeauty`;
           <tr><td style="padding:10px 0;border-bottom:1px solid #eee;color:#777;">Date / période</td><td style="padding:10px 0;border-bottom:1px solid #eee;font-weight:bold;text-align:right;">${escapeHtml(period)}</td></tr>
           <tr><td style="padding:10px 0;border-bottom:1px solid #eee;color:#777;">Créneau</td><td style="padding:10px 0;border-bottom:1px solid #eee;font-weight:bold;text-align:right;">${escapeHtml(slotLabel)}</td></tr>
           ${summary.duration ? `<tr><td style="padding:10px 0;border-bottom:1px solid #eee;color:#777;">Durée</td><td style="padding:10px 0;border-bottom:1px solid #eee;font-weight:bold;text-align:right;">${escapeHtml(summary.duration)}</td></tr>` : ""}
+          <tr><td style="padding:10px 0;border-bottom:1px solid #eee;color:#777;">Lieu</td><td style="padding:10px 0;border-bottom:1px solid #eee;font-weight:bold;text-align:right;">${escapeHtml(process.env.FORMATION_ADDRESS || "22, rue de la révolution, Montreuil, 93100")}</td></tr>
           <tr><td style="padding:10px 0;border-bottom:1px solid #eee;color:#777;">Montant payé</td><td style="padding:10px 0;border-bottom:1px solid #eee;font-weight:bold;text-align:right;color:#c9a961;">${escapeHtml(paid)}</td></tr>
           ${balance ? `<tr><td style="padding:10px 0;border-bottom:1px solid #eee;color:#777;">Reste à régler</td><td style="padding:10px 0;border-bottom:1px solid #eee;font-weight:bold;text-align:right;">${escapeHtml(balance)}</td></tr>` : ""}
         </table>
@@ -269,7 +273,9 @@ async function sendAdminNotificationEmail(summary) {
   if (!transporter || !adminTo) return;
 
   const from = process.env.SMTP_FROM || "RKbeauty <no-reply@rkbeauty.fr>";
-  const slotLabel = summary.slot === "morning" ? "Matin" : "Après-midi";
+  const slotLabel = summary.slot === "early_morning" ? "Matin 8h30"
+    : summary.slot === "morning" ? "Matin 11h30"
+    : "Après-midi";
   const typeLabel = summary.type === "service" ? "Prestation" : "Formation";
   const period = summary.dateStart && summary.dateEnd && summary.dateStart !== summary.dateEnd
     ? `${formatDateFr(summary.dateStart)} au ${formatDateFr(summary.dateEnd)}`
@@ -318,34 +324,35 @@ async function finalizeGroup(session) {
   if (already.length) return null;
 
   const [holds] = await db.query(
-    "SELECT * FROM reservation_holds WHERE group_id=? AND stripe_session_id=? ORDER BY date_start ASC, id ASC",
+    "SELECT * FROM reservation_holds WHERE group_id=? AND stripe_session_id=? ORDER BY date ASC, id ASC",
     [groupId, session.id]
   );
   if (!holds.length) return null;
 
   const metaObj = parseJsonValue(holds[0]?.meta);
-  const hold = holds[0]; // Une seule ligne par réservation désormais
-  const metaValue = typeof hold.meta === "string" ? hold.meta : JSON.stringify(hold.meta || {});
-  const reservationType = hold.type === "service" ? "service" : "formation";
 
-  await db.query(
-    `INSERT INTO reservations
-     (date_start, date_end, slot, type, meta, status, paid_at, formation, amount, currency, stripe_session_id, stripe_payment_intent_id, formation_session_id)
-     VALUES (?, ?, ?, ?, ?, 'paid', NOW(), ?, ?, ?, ?, ?, ?)`,
-    [
-      hold.date_start,
-      hold.date_end,
-      hold.slot,
-      reservationType,
-      metaValue,
-      hold.formation,
-      hold.amount,
-      hold.currency || "eur",
-      session.id,
-      session.payment_intent || null,
-      hold.formation_session_id || null,
-    ]
-  );
+  for (const hold of holds) {
+    const metaValue = typeof hold.meta === "string" ? hold.meta : JSON.stringify(hold.meta || {});
+    const reservationType = hold.type === "service" ? "service" : "formation";
+
+    await db.query(
+      `INSERT INTO reservations
+       (date, slot, type, meta, status, paid_at, formation, amount, currency, stripe_session_id, stripe_payment_intent_id, formation_session_id)
+       VALUES (?, ?, ?, ?, 'paid', NOW(), ?, ?, ?, ?, ?, ?)`,
+      [
+        hold.date,
+        hold.slot,
+        reservationType,
+        metaValue,
+        hold.formation,
+        hold.amount,
+        hold.currency || "eur",
+        session.id,
+        session.payment_intent || null,
+        hold.formation_session_id || null,
+      ]
+    );
+  }
 
   await db.query("DELETE FROM reservation_holds WHERE group_id=?", [groupId]);
 
@@ -371,8 +378,8 @@ async function finalizeGroup(session) {
     daysCount: metaObj.days_count || holds.length,
     currency: session.currency || "eur",
     slot: metaObj.slot || session.metadata?.slot || holds[0]?.slot,
-    dateStart: metaObj.date_start || session.metadata?.date_start || toSQLDate(holds[0]?.date_start),
-    dateEnd: metaObj.date_end || session.metadata?.date_end || toSQLDate(holds[0]?.date_end),
+    dateStart: metaObj.date_start || session.metadata?.date_start || toSQLDate(holds[0]?.date),
+    dateEnd: metaObj.date_end || session.metadata?.date_end || toSQLDate(holds[holds.length - 1]?.date),
   };
 }
 
@@ -439,13 +446,14 @@ async function createCheckoutSession(req, res) {
       days_count: dates.length,
     };
 
-    // Un seul hold par réservation — date_start et date_end couvrent toute la période
-    await conn.query(
-      `INSERT INTO reservation_holds
-       (group_id, formation_session_id, date_start, date_end, slot, type, formation, amount, currency, expires_at, meta)
-       VALUES (?, ?, ?, ?, ?, 'formation', ?, ?, 'eur', DATE_ADD(NOW(), INTERVAL 15 MINUTE), ?)`,
-      [groupId, formationSessionId, dates[0], dates[dates.length - 1], cleanSlot, dbFormationLabel, amount, JSON.stringify(meta)]
-    );
+    for (const date of dates) {
+      await conn.query(
+        `INSERT INTO reservation_holds
+         (group_id, formation_session_id, date, slot, type, formation, amount, currency, expires_at, meta)
+         VALUES (?, ?, ?, ?, 'formation', ?, ?, 'eur', DATE_ADD(NOW(), INTERVAL 15 MINUTE), ?)`,
+        [groupId, formationSessionId, date, cleanSlot, dbFormationLabel, amount, JSON.stringify(meta)]
+      );
+    }
 
     const checkoutSession = await stripe.checkout.sessions.create({
       mode: "payment",
@@ -564,9 +572,9 @@ async function createServiceCheckoutSession(req, res) {
 
     await conn.query(
       `INSERT INTO reservation_holds
-       (group_id, formation_session_id, date_start, date_end, slot, type, formation, amount, currency, expires_at, meta)
-       VALUES (?, NULL, ?, ?, ?, 'service', ?, ?, 'eur', DATE_ADD(NOW(), INTERVAL 15 MINUTE), ?)`,
-      [groupId, cleanDate, cleanDate, cleanSlot, serviceName, amount, JSON.stringify(meta)]
+       (group_id, formation_session_id, date, slot, type, formation, amount, currency, expires_at, meta)
+       VALUES (?, NULL, ?, ?, 'service', ?, ?, 'eur', DATE_ADD(NOW(), INTERVAL 15 MINUTE), ?)`,
+      [groupId, cleanDate, cleanSlot, serviceName, amount, JSON.stringify(meta)]
     );
 
     const checkoutSession = await stripe.checkout.sessions.create({
@@ -671,9 +679,10 @@ async function getCheckoutSessionStatus(req, res) {
     const checkoutSession = await stripe.checkout.sessions.retrieve(sessionId);
 
     const [[reservation]] = await db.query(
-      `SELECT id, date_start, date_end, slot, type, meta, status, formation, amount, currency, stripe_session_id, formation_session_id
+      `SELECT id, date, slot, type, meta, status, formation, amount, currency, stripe_session_id, formation_session_id
        FROM reservations
        WHERE stripe_session_id=?
+       ORDER BY date ASC, id ASC
        LIMIT 1`,
       [sessionId]
     );

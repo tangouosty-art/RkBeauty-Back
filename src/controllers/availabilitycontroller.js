@@ -53,14 +53,20 @@ async function getAvailability(req, res) {
     const afternoonQuota = ov.afternoon && ov.afternoon.quota != null ? ov.afternoon.quota : base.afternoon;
 
     // Une ligne par réservation — COUNT(*) est correct
-    // Pour les formations : date_start <= date <= date_end
-    // Pour les services   : date_start = date_end = date
+    const [[paidEarlyMorning]] = await db.query(
+      "SELECT COUNT(*) AS total FROM reservations WHERE date_start <= ? AND date_end >= ? AND slot='early_morning' AND type=? AND status='paid'",
+      [date, date, type]
+    );
     const [[paidMorning]] = await db.query(
       "SELECT COUNT(*) AS total FROM reservations WHERE date_start <= ? AND date_end >= ? AND slot='morning' AND type=? AND status='paid'",
       [date, date, type]
     );
     const [[paidAfternoon]] = await db.query(
       "SELECT COUNT(*) AS total FROM reservations WHERE date_start <= ? AND date_end >= ? AND slot='afternoon' AND type=? AND status='paid'",
+      [date, date, type]
+    );
+    const [[holdEarlyMorning]] = await db.query(
+      "SELECT COUNT(*) AS total FROM reservation_holds WHERE date_start <= ? AND date_end >= ? AND slot='early_morning' AND type=? AND expires_at > NOW()",
       [date, date, type]
     );
     const [[holdMorning]] = await db.query(
@@ -72,13 +78,35 @@ async function getAvailability(req, res) {
       [date, date, type]
     );
 
-    const remainingMorning   = morningOpen   ? Math.max(0, morningQuota   - (Number(paidMorning.total)   + Number(holdMorning.total)))   : 0;
-    const remainingAfternoon = afternoonOpen ? Math.max(0, afternoonQuota - (Number(paidAfternoon.total) + Number(holdAfternoon.total))) : 0;
+    // Quotas early_morning (même quota que morning par défaut)
+    let earlyMorningOpen = true;
+    let earlyMorningQuota = base.morning;
+    try {
+      const [[ovEarly]] = await db.query(
+        "SELECT `open`, quota FROM schedule_overrides WHERE date=? AND type=? AND slot='early_morning'",
+        [date, type]
+      );
+      if (ovEarly) {
+        earlyMorningOpen = !!ovEarly.open;
+        if (ovEarly.quota != null) earlyMorningQuota = Number(ovEarly.quota);
+      }
+    } catch {}
+
+    const remainingEarlyMorning = earlyMorningOpen ? Math.max(0, earlyMorningQuota - (Number(paidEarlyMorning.total) + Number(holdEarlyMorning.total))) : 0;
+    const remainingMorning      = morningOpen      ? Math.max(0, morningQuota      - (Number(paidMorning.total)      + Number(holdMorning.total)))      : 0;
+    const remainingAfternoon    = afternoonOpen    ? Math.max(0, afternoonQuota    - (Number(paidAfternoon.total)    + Number(holdAfternoon.total)))    : 0;
 
     return res.json({
       date,
       type,
       slots: {
+        early_morning: {
+          open: earlyMorningOpen,
+          quota: earlyMorningQuota,
+          reserved: Number(paidEarlyMorning.total),
+          holds: Number(holdEarlyMorning.total),
+          remaining: remainingEarlyMorning,
+        },
         morning: {
           open: morningOpen,
           quota: morningQuota,
