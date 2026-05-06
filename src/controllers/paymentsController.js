@@ -120,13 +120,13 @@ async function assertSlotAvailable(conn, { date, slot, type }) {
   }
 
   const [[paidRow]] = await conn.query(
-    "SELECT COUNT(*) AS total FROM reservations WHERE date=? AND slot=? AND type=? AND status='paid' FOR UPDATE",
-    [date, slot, type]
+    "SELECT COUNT(*) AS total FROM reservations WHERE date_start <= ? AND date_end >= ? AND slot=? AND type=? AND status='paid' FOR UPDATE",
+    [date, date, slot, type]
   );
 
   const [[holdsRow]] = await conn.query(
-    "SELECT COUNT(*) AS total FROM reservation_holds WHERE date=? AND slot=? AND type=? AND expires_at > NOW() FOR UPDATE",
-    [date, slot, type]
+    "SELECT COUNT(*) AS total FROM reservation_holds WHERE date_start <= ? AND date_end >= ? AND slot=? AND type=? AND expires_at > NOW() FOR UPDATE",
+    [date, date, slot, type]
   );
 
   if (Number(paidRow.total) + Number(holdsRow.total) >= Number(quota)) {
@@ -324,7 +324,7 @@ async function finalizeGroup(session) {
   if (already.length) return null;
 
   const [holds] = await db.query(
-    "SELECT * FROM reservation_holds WHERE group_id=? AND stripe_session_id=? ORDER BY date ASC, id ASC",
+    "SELECT * FROM reservation_holds WHERE group_id=? AND stripe_session_id=? ORDER BY date_start ASC, id ASC",
     [groupId, session.id]
   );
   if (!holds.length) return null;
@@ -337,10 +337,11 @@ async function finalizeGroup(session) {
 
     await db.query(
       `INSERT INTO reservations
-       (date, slot, type, meta, status, paid_at, formation, amount, currency, stripe_session_id, stripe_payment_intent_id, formation_session_id)
-       VALUES (?, ?, ?, ?, 'paid', NOW(), ?, ?, ?, ?, ?, ?)`,
+       (date_start, date_end, slot, type, meta, status, paid_at, formation, amount, currency, stripe_session_id, stripe_payment_intent_id, formation_session_id)
+       VALUES (?, ?, ?, ?, ?, 'paid', NOW(), ?, ?, ?, ?, ?, ?)`,
       [
-        hold.date,
+        hold.date_start,
+        hold.date_end,
         hold.slot,
         reservationType,
         metaValue,
@@ -378,8 +379,8 @@ async function finalizeGroup(session) {
     daysCount: metaObj.days_count || holds.length,
     currency: session.currency || "eur",
     slot: metaObj.slot || session.metadata?.slot || holds[0]?.slot,
-    dateStart: metaObj.date_start || session.metadata?.date_start || toSQLDate(holds[0]?.date),
-    dateEnd: metaObj.date_end || session.metadata?.date_end || toSQLDate(holds[holds.length - 1]?.date),
+    dateStart: metaObj.date_start || session.metadata?.date_start || toSQLDate(holds[0]?.date_start),
+    dateEnd: metaObj.date_end || session.metadata?.date_end || toSQLDate(holds[0]?.date_end),
   };
 }
 
@@ -446,14 +447,13 @@ async function createCheckoutSession(req, res) {
       days_count: dates.length,
     };
 
-    for (const date of dates) {
-      await conn.query(
-        `INSERT INTO reservation_holds
-         (group_id, formation_session_id, date, slot, type, formation, amount, currency, expires_at, meta)
-         VALUES (?, ?, ?, ?, 'formation', ?, ?, 'eur', DATE_ADD(NOW(), INTERVAL 15 MINUTE), ?)`,
-        [groupId, formationSessionId, date, cleanSlot, dbFormationLabel, amount, JSON.stringify(meta)]
-      );
-    }
+    // Un seul hold par réservation
+    await conn.query(
+      `INSERT INTO reservation_holds
+       (group_id, formation_session_id, date_start, date_end, slot, type, formation, amount, currency, expires_at, meta)
+       VALUES (?, ?, ?, ?, ?, 'formation', ?, ?, 'eur', DATE_ADD(NOW(), INTERVAL 15 MINUTE), ?)`,
+      [groupId, formationSessionId, dates[0], dates[dates.length - 1], cleanSlot, dbFormationLabel, amount, JSON.stringify(meta)]
+    );
 
     const checkoutSession = await stripe.checkout.sessions.create({
       mode: "payment",
@@ -572,9 +572,9 @@ async function createServiceCheckoutSession(req, res) {
 
     await conn.query(
       `INSERT INTO reservation_holds
-       (group_id, formation_session_id, date, slot, type, formation, amount, currency, expires_at, meta)
-       VALUES (?, NULL, ?, ?, 'service', ?, ?, 'eur', DATE_ADD(NOW(), INTERVAL 15 MINUTE), ?)`,
-      [groupId, cleanDate, cleanSlot, serviceName, amount, JSON.stringify(meta)]
+       (group_id, formation_session_id, date_start, date_end, slot, type, formation, amount, currency, expires_at, meta)
+       VALUES (?, NULL, ?, ?, ?, 'service', ?, ?, 'eur', DATE_ADD(NOW(), INTERVAL 15 MINUTE), ?)`,
+      [groupId, cleanDate, cleanDate, cleanSlot, serviceName, amount, JSON.stringify(meta)]
     );
 
     const checkoutSession = await stripe.checkout.sessions.create({
@@ -679,10 +679,9 @@ async function getCheckoutSessionStatus(req, res) {
     const checkoutSession = await stripe.checkout.sessions.retrieve(sessionId);
 
     const [[reservation]] = await db.query(
-      `SELECT id, date, slot, type, meta, status, formation, amount, currency, stripe_session_id, formation_session_id
+      `SELECT id, date_start, date_end, slot, type, meta, status, formation, amount, currency, stripe_session_id, formation_session_id
        FROM reservations
        WHERE stripe_session_id=?
-       ORDER BY date ASC, id ASC
        LIMIT 1`,
       [sessionId]
     );
