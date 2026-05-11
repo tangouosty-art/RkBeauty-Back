@@ -337,12 +337,13 @@ async function finalizeGroup(session) {
 
     await db.query(
       `INSERT INTO reservations
-       (date_start, date_end, slot, type, meta, status, paid_at, formation, amount, currency, stripe_session_id, stripe_payment_intent_id, formation_session_id)
-       VALUES (?, ?, ?, ?, ?, 'paid', NOW(), ?, ?, ?, ?, ?, ?)`,
+       (date_start, date_end, slot, time_slot, type, meta, status, paid_at, formation, amount, currency, stripe_session_id, stripe_payment_intent_id, formation_session_id)
+       VALUES (?, ?, ?, ?, ?, ?, 'paid', NOW(), ?, ?, ?, ?, ?, ?)`,
       [
         hold.date_start,
         hold.date_end,
         hold.slot,
+        hold.time_slot || null,
         reservationType,
         metaValue,
         hold.formation,
@@ -499,7 +500,7 @@ async function createCheckoutSession(req, res) {
 }
 
 async function createServiceCheckoutSession(req, res) {
-  const { slotDate, slotTime, customer, service } = req.body || {};
+  const { slotDate, slotTime, timeSlot, customer, service } = req.body || {};
   const cleanDate = toSQLDate(slotDate);
   const cleanSlot = normalizeSlot(slotTime);
 
@@ -565,6 +566,7 @@ async function createServiceCheckoutSession(req, res) {
       formation: serviceName,
       totalPriceEUR: depositEUR,
       slot: cleanSlot,
+      time_slot: timeSlot || null,
       date_start: cleanDate,
       date_end: cleanDate,
       days_count: 1,
@@ -572,9 +574,9 @@ async function createServiceCheckoutSession(req, res) {
 
     await conn.query(
       `INSERT INTO reservation_holds
-       (group_id, formation_session_id, date_start, date_end, slot, type, formation, amount, currency, expires_at, meta)
-       VALUES (?, NULL, ?, ?, ?, 'service', ?, ?, 'eur', DATE_ADD(NOW(), INTERVAL 15 MINUTE), ?)`,
-      [groupId, cleanDate, cleanDate, cleanSlot, serviceName, amount, JSON.stringify(meta)]
+       (group_id, formation_session_id, date_start, date_end, slot, time_slot, type, formation, amount, currency, expires_at, meta)
+       VALUES (?, NULL, ?, ?, ?, ?, 'service', ?, ?, 'eur', DATE_ADD(NOW(), INTERVAL 15 MINUTE), ?)`,
+      [groupId, cleanDate, cleanDate, cleanSlot, timeSlot || null, serviceName, amount, JSON.stringify(meta)]
     );
 
     const checkoutSession = await stripe.checkout.sessions.create({
