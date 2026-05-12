@@ -258,7 +258,7 @@ async function createAdminSession(req, res) {
   if (!start_date)      return res.status(400).json({ message: "start_date requis (YYYY-MM-DD)" });
   if (!Number.isFinite(price_eur) || price_eur < 0) return res.status(400).json({ message: "price_eur invalide" });
   if (!Number.isFinite(days_count) || days_count < 1 || days_count > 60) return res.status(400).json({ message: "days_count invalide (1..60)" });
-  if (!["morning","afternoon","both"].includes(slot_policy)) return res.status(400).json({ message: "slot_policy invalide" });
+  if (!["morning","afternoon","both","early_morning"].includes(slot_policy)) return res.status(400).json({ message: "slot_policy invalide" });
   if (!["draft","published","closed"].includes(status)) return res.status(400).json({ message: "status invalide" });
   if (!Number.isFinite(capacity) || capacity < 1) return res.status(400).json({ message: "capacity invalide (>=1)" });
 
@@ -310,7 +310,7 @@ async function updateAdminSession(req, res) {
   if (b.start_date !== undefined) addField("start_date", String(b.start_date).trim());
   if (b.slot_policy !== undefined) {
     const v = String(b.slot_policy).trim();
-    if (!["morning","afternoon","both"].includes(v)) return res.status(400).json({ message: "slot_policy invalide" });
+    if (!["morning","afternoon","both","early_morning"].includes(v)) return res.status(400).json({ message: "slot_policy invalide" });
     addField("slot_policy", v);
   }
   if (b.status !== undefined) {
