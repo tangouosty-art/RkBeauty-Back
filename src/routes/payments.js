@@ -1,11 +1,16 @@
-const router = require("express").Router();
+const express = require("express");
+const router = express.Router();
 
 const {
   createCheckoutSession,
   createServiceCheckoutSession,
   getCheckoutSessionStatus,
   cancelGroup,
+  stripeWebhook,
 } = require("../controllers/paymentsController");
+
+// ⚠️ Webhook Stripe — doit être AVANT express.json() donc on utilise express.raw()
+router.post("/webhook", express.raw({ type: "application/json" }), stripeWebhook);
 
 // Formations multi-jours : nécessite formation_session_id
 router.post("/create-checkout-session", createCheckoutSession);
