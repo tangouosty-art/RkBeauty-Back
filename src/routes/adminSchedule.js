@@ -22,56 +22,58 @@ function assertType(type) {
   return type === "service" || type === "formation";
 }
 
-// GET /admin/schedule?date=YYYY-MM-DD&type=service|formation
+// GET /admin/schedule?date=YYYY-MM-DD&type=service|formation&session_id=N
 router.get("/schedule", requireAdmin, async (req, res) => {
-  const { date, type } = req.query;
-
+  const { date, type, session_id } = req.query;
   if (!date) return res.status(400).json({ message: "date manquante" });
   if (!assertType(type)) return res.status(400).json({ message: "type invalide" });
 
   try {
-    const [rows] = await db.query(
-      "SELECT slot, time_slot, `open`, quota FROM schedule_overrides WHERE date=? AND type=?",
-      [date, type]
-    );
+    let rows;
+    if (type === "formation" && session_id) {
+      [rows] = await db.query(
+        "SELECT slot, time_slot, `open`, quota FROM schedule_overrides WHERE date=? AND type=? AND formation_session_id=?",
+        [date, type, Number(session_id)]
+      );
+      if (!rows.length) {
+        [rows] = await db.query(
+          "SELECT slot, time_slot, `open`, quota FROM schedule_overrides WHERE date=? AND type=? AND formation_session_id IS NULL",
+          [date, type]
+        );
+      }
+    } else {
+      [rows] = await db.query(
+        "SELECT slot, time_slot, `open`, quota FROM schedule_overrides WHERE date=? AND type=? AND formation_session_id IS NULL",
+        [date, type]
+      );
+    }
 
     if (type === "service") {
-      // Retourner les heures avec leur statut
       const overrideMap = {};
       for (const r of rows) {
         const key = r.time_slot || r.slot;
         overrideMap[key] = { open: !!r.open, quota: r.quota != null ? Number(r.quota) : 3 };
       }
-
-      // Construire la réponse avec toutes les heures
       const morning = SERVICE_HOURS.filter(h => parseInt(h) < 14).map(h => ({
-        time: h,
-        open: overrideMap[h] ? overrideMap[h].open : true,
-        quota: overrideMap[h] ? overrideMap[h].quota : 3,
+        time: h, open: overrideMap[h] ? overrideMap[h].open : true, quota: overrideMap[h] ? overrideMap[h].quota : 3,
       }));
       const afternoon = SERVICE_HOURS.filter(h => parseInt(h) >= 14).map(h => ({
-        time: h,
-        open: overrideMap[h] ? overrideMap[h].open : true,
-        quota: overrideMap[h] ? overrideMap[h].quota : 3,
+        time: h, open: overrideMap[h] ? overrideMap[h].open : true, quota: overrideMap[h] ? overrideMap[h].quota : 3,
       }));
-
       return res.json({ date, type, mode: "hourly", slots: { morning, afternoon } });
     }
 
-    // Formation : créneaux
     const out = {
-      date, type,
+      date, type, session_id: session_id || null,
       morning:       { ...DEFAULTS.morning },
       afternoon:     { ...DEFAULTS.afternoon },
       early_morning: { ...DEFAULTS.early_morning },
     };
-
     for (const r of rows) {
       if (!r.time_slot && r.slot === "morning")       { out.morning.open = !!r.open; out.morning.quota = Number(r.quota ?? 8); }
       if (!r.time_slot && r.slot === "afternoon")     { out.afternoon.open = !!r.open; out.afternoon.quota = Number(r.quota ?? 8); }
       if (!r.time_slot && r.slot === "early_morning") { out.early_morning.open = !!r.open; out.early_morning.quota = Number(r.quota ?? 8); }
     }
-
     return res.json(out);
   } catch (e) {
     console.error(e);
@@ -79,50 +81,42 @@ router.get("/schedule", requireAdmin, async (req, res) => {
   }
 });
 
-// PUT /admin/schedule?date=YYYY-MM-DD&type=service|formation
+// PUT /admin/schedule?date=YYYY-MM-DD&type=service|formation&session_id=N
 router.put("/schedule", requireAdmin, async (req, res) => {
-  const { date, type } = req.query;
+  const { date, type, session_id } = req.query;
   const body = req.body || {};
-
   if (!date) return res.status(400).json({ message: "date manquante" });
   if (!assertType(type)) return res.status(400).json({ message: "type invalide" });
 
+  const sessionIdVal = session_id ? Number(session_id) : null;
   const conn = await db.getConnection();
   try {
     await conn.beginTransaction();
 
     if (type === "service") {
-      // body.hours = { "09:00": {open, quota}, "10:00": {open, quota}, ... }
       const hours = body.hours || {};
       for (const [hour, config] of Object.entries(hours)) {
         if (!SERVICE_HOURS.includes(hour)) continue;
         const slotName = parseInt(hour) < 14 ? "morning" : "afternoon";
-        const open = config.open ?? true;
-        const quota = Number(config.quota ?? 3);
-
         await conn.query(
-          `INSERT INTO schedule_overrides(date, type, slot, time_slot, \`open\`, quota)
-           VALUES(?, ?, ?, ?, ?, ?)
+          `INSERT INTO schedule_overrides(date, type, formation_session_id, slot, time_slot, \`open\`, quota)
+           VALUES(?, ?, NULL, ?, ?, ?, ?)
            ON DUPLICATE KEY UPDATE \`open\`=VALUES(\`open\`), quota=VALUES(quota)`,
-          [date, type, slotName, hour, open ? 1 : 0, quota]
+          [date, type, slotName, hour, (config.open ?? true) ? 1 : 0, Number(config.quota ?? 3)]
         );
       }
     } else {
-      // Formation : morning, afternoon, early_morning
       const slots = {
         morning:       body.morning       || {},
         afternoon:     body.afternoon     || {},
         early_morning: body.early_morning || {},
       };
-
       for (const [slotName, config] of Object.entries(slots)) {
-        const open  = config.open  ?? true;
-        const quota = Number(config.quota ?? 8);
         await conn.query(
-          `INSERT INTO schedule_overrides(date, type, slot, time_slot, \`open\`, quota)
-           VALUES(?, ?, ?, NULL, ?, ?)
+          `INSERT INTO schedule_overrides(date, type, formation_session_id, slot, time_slot, \`open\`, quota)
+           VALUES(?, ?, ?, ?, NULL, ?, ?)
            ON DUPLICATE KEY UPDATE \`open\`=VALUES(\`open\`), quota=VALUES(quota)`,
-          [date, type, slotName, open ? 1 : 0, quota]
+          [date, type, sessionIdVal, slotName, (config.open ?? true) ? 1 : 0, Number(config.quota ?? 8)]
         );
       }
     }
@@ -138,15 +132,17 @@ router.put("/schedule", requireAdmin, async (req, res) => {
   }
 });
 
-// DELETE /admin/schedule?date=YYYY-MM-DD&type=service|formation
+// DELETE /admin/schedule?date=YYYY-MM-DD&type=service|formation&session_id=N
 router.delete("/schedule", requireAdmin, async (req, res) => {
-  const { date, type } = req.query;
-
+  const { date, type, session_id } = req.query;
   if (!date) return res.status(400).json({ message: "date manquante" });
   if (!assertType(type)) return res.status(400).json({ message: "type invalide" });
-
   try {
-    await db.query("DELETE FROM schedule_overrides WHERE date=? AND type=?", [date, type]);
+    if (session_id) {
+      await db.query("DELETE FROM schedule_overrides WHERE date=? AND type=? AND formation_session_id=?", [date, type, Number(session_id)]);
+    } else {
+      await db.query("DELETE FROM schedule_overrides WHERE date=? AND type=? AND formation_session_id IS NULL", [date, type]);
+    }
     return res.json({ ok: true });
   } catch (e) {
     console.error(e);
